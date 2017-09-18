@@ -10,8 +10,9 @@ import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
-
-import com.tonnay.opencv.natives.OpenCVProxy;
+import org.eclipse.swt.widgets.Button;
+import org.eclipse.swt.events.SelectionAdapter;
+import org.eclipse.swt.events.SelectionEvent;
 
 public class MainForm extends ApplicationWindow {
 
@@ -33,6 +34,34 @@ public class MainForm extends ApplicationWindow {
     @Override
     protected Control createContents(Composite parent) {
         Composite container = new Composite(parent, SWT.NONE);
+        
+        {
+            Button btnShowimage = new Button(container, SWT.NONE);
+            btnShowimage.addSelectionListener(new SelectionAdapter() {
+                @Override
+                public void widgetSelected(SelectionEvent e) {
+                    String filepath = JfaceUtils.getFileName(getShell());
+                    System.out.println(filepath);
+                    OpenCVTest.getInstance().testImgShow(filepath);
+                }
+            });
+            btnShowimage.setBounds(10, 10, 120, 32);
+            btnShowimage.setText("ShowImage");
+        }
+        
+        {
+            Button btnLoaddualimg = new Button(container, SWT.NONE);
+            btnLoaddualimg.addSelectionListener(new SelectionAdapter() {
+                @Override
+                public void widgetSelected(SelectionEvent e) {
+                    String[] dualImg = JfaceUtils.getImageDual(getShell());
+                    System.out.println(dualImg[0] + "\n" + dualImg[1]);
+                    OpenCVTest.getInstance().compareDualImages(dualImg[0] , dualImg[1]);
+                }
+            });
+            btnLoaddualimg.setBounds(10, 48, 120, 32);
+            btnLoaddualimg.setText("LoadDualImage");
+        }
 
         return container;
     }
@@ -80,13 +109,10 @@ public class MainForm extends ApplicationWindow {
      */
     public static void main(String args[]) {
         try {
-//            MainForm window = new MainForm();
-//            window.setBlockOnOpen(true);
-//            window.open();
-//            Display.getCurrent().dispose();
-//            OpenCVProxy.getInstance().showImage("C:/Users/ForeverApp/Desktop/testImg/left.jpg");
-            OpenCVProxy.getInstance().compareImage("C:/Users/ForeverApp/Desktop/testImg/left.jpg",
-                    "C:/Users/ForeverApp/Desktop/testImg/right.jpg");
+            MainForm window = new MainForm();
+            window.setBlockOnOpen(true);
+            window.open();
+            Display.getCurrent().dispose();
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -109,5 +135,4 @@ public class MainForm extends ApplicationWindow {
     protected Point getInitialSize() {
         return new Point(450, 300);
     }
-
 }
