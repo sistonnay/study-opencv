@@ -62,7 +62,6 @@ public class MainForm extends ApplicationWindow {
             btnLoaddualimg.setBounds(10, 48, 120, 32);
             btnLoaddualimg.setText("LoadDualImage");
         }
-
         return container;
     }
 

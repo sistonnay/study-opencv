@@ -1,5 +1,7 @@
 package com.tonnay.opencv;
 
+import com.tonnay.opencv.natives.OpenCVNative;
+
 public class OpenCVTest {
     
     private static OpenCVNative mOpenCVNative;

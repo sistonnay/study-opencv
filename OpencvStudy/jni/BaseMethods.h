@@ -57,9 +57,10 @@ void * SURFThread(void * param) {
             *temp->dst);
 
     gettimeofday(&end, NULL);
-    char * spend = calTimeSpend(start, end, "SURF");
-    LOG(TAG_BAGE, spend);
-    delete (spend);
+
+    LOG(TAG_BAGE, "Total spend of %s: %d ms.", "SURF",
+            (int )(1000 * (end.tv_sec - start.tv_sec)
+                    + (end.tv_usec - start.tv_usec) / 1000));
 
     pthread_detach(pthread_self());
     return NULL;
@@ -67,7 +68,11 @@ void * SURFThread(void * param) {
 
 class BaseMethods {
 public:
-    static double zoom_default;
+    static double dual_camera_f; //相同双摄，焦距，米
+    static double dual_camera_t; //轴心距离，米
+    static double dual_camera_d; //分辨率 米
+    static double zoom_size; //放大倍数
+    static double density; // 实际分辨率
 
 public:
     BaseMethods();
@@ -82,18 +87,24 @@ public:
     static bool refineMatchesWithHomography(const vector<KeyPoint>& queryPoints,
             const vector<KeyPoint>& trainPoints, float reprojectionThreshold,
             vector<DMatch>& matches, Mat& homography);
-
+    static void calculateDistance(const vector<KeyPoint>& queryPoints,
+            const vector<KeyPoint>& trainPoints, const vector<DMatch>& matches,
+            vector<double> & distances);
 };
 
-double BaseMethods::zoom_default = 0.25;
+double BaseMethods::zoom_size = 0.5; // 1
+double BaseMethods::dual_camera_f = 3.75 / 1000; // m
+double BaseMethods::dual_camera_t = 21.0 / 1000; // m
+double BaseMethods::dual_camera_d = 2 * 1.25 / 1000000; // m, 成图相机有缩放
+double BaseMethods::density = dual_camera_d;
 
 int BaseMethods::showImage(const char* img) {
     Mat src = imread(img, IMREAD_COLOR), dst;
     if (!src.data) {
-        LOG(TAG_BAGE, "No data!--Exiting the program!");
+        LOG(TAG_BAGE, "%s", "No data!--Exiting the program!");
         return -1;
     }
-    resizeImage(src, dst, zoom_default, INTER_LINEAR);
+    resizeImage(src, dst, zoom_size, INTER_LINEAR);
     namedWindow("Show Image", CV_WINDOW_AUTOSIZE);
     imshow("Show Image", dst);
     waitKey(0);
@@ -102,9 +113,11 @@ int BaseMethods::showImage(const char* img) {
 
 void BaseMethods::resizeImage(Mat& src, Mat& dest, double size, int type) {
     if (src.data == NULL) {
-        LOG(TAG, "Input Mat is null!");
+        LOG(TAG_BAGE, "%s", "Input Mat is null!");
         return;
     }
+    density = dual_camera_d / size;
+    LOG(TAG_BAGE, "Current density is %.7f.", density);
     //Size re_size = src.size() / size;
     int width = src.size().width * size;
     int heigth = src.size().height * size;
@@ -113,21 +126,21 @@ void BaseMethods::resizeImage(Mat& src, Mat& dest, double size, int type) {
 
 int BaseMethods::compareImages(const char* img1, const char* img2) {
 
-    Mat rsrc_1, rsrc_2;
-    Mat src_1 = imread(img1), src_2 = imread(img2);
+    Mat rsrc_query, rsrc_train;
+    Mat src_query = imread(img1), src_train = imread(img2);
 
-    resizeImage(src_1, rsrc_1, 0.5, INTER_LINEAR);
-    resizeImage(src_2, rsrc_2, 0.5, INTER_LINEAR);
+    resizeImage(src_query, rsrc_query, zoom_size, INTER_LINEAR);
+    resizeImage(src_train, rsrc_train, zoom_size, INTER_LINEAR);
 
     struct timeval start, end;
     gettimeofday(&start, NULL); // Linux 下
 
-    Mat dest_1, dest_2;
-    vector<KeyPoint> keypoints_1, keypoints_2;
+    Mat dest_query, dest_train;
+    vector<KeyPoint> keypoints_query, keypoints_train;
     Ptr<Feature2D> surf = SURF::create();
 
-    SurfParams surfParam1(&rsrc_1, &dest_1, &keypoints_1, &surf);
-    SurfParams surfParam2(&rsrc_2, &dest_2, &keypoints_2, &surf);
+    SurfParams surfParam1(&rsrc_query, &dest_query, &keypoints_query, &surf);
+    SurfParams surfParam2(&rsrc_train, &dest_train, &keypoints_train, &surf);
 
     pthread_t th1, th2;
     pthread_create(&th1, NULL, SURFThread, &surfParam1);
@@ -135,34 +148,75 @@ int BaseMethods::compareImages(const char* img1, const char* img2) {
     pthread_join(th1, NULL);
     pthread_join(th2, NULL);
 
-    // surf->detectAndCompute(rsrc_1, noArray(), keypoints_1, dest_1);
-    // surf->detectAndCompute(rsrc_2, noArray(), keypoints_2, dest_2);
+    // surf->detectAndCompute(rsrc_query, noArray(), keypoints_query, dest_query);
+    // surf->detectAndCompute(rsrc_train, noArray(), keypoints_train, dest_train);
 
     vector<DMatch> matches;
     BFMatcher matcher(NORM_L2);
     // FlannBasedMatcher matcher(NORM_L1);
-    matchFeatures(dest_1, dest_2, matches, matcher);
+    matchFeatures(dest_query, dest_train, matches, matcher);
     // Homography Match
-    Mat homography;
-    refineMatchesWithHomography(keypoints_1, keypoints_2, 3, matches,
+    Mat homography; // 透射矩阵
+    refineMatchesWithHomography(keypoints_query, keypoints_train, 3, matches,
             homography);
-    cout<< homography <<endl;
+
+    LOG(TAG_BAGE, "%s", "透射矩阵;");
+    cout << homography << endl; // 透视矩阵，一个点到另一个点的变换，即仿射变换
+
+//    -- Get the corners from the img1
+//    vector<Point2f> corners_query(4);
+//    corners_query[0] = Point2f(0, 0);
+//    corners_query[1] = Point2f(rsrc_query.cols, 0);
+//    corners_query[2] = Point2f(rsrc_query.cols, rsrc_query.rows);
+//    corners_query[3] = Point2f(0, rsrc_query.rows);
+//
+//    cout << endl << corners_query << endl;
+//
+//    vector<Point2f> corners_train(4);
+//    vector<Point2f> corners_query(4);
+//    perspectiveTransform(corners_query, corners_train, homography);
+
+//    cout << endl << corners_train << endl;
+
+    vector<double> distances;
+    LOG(TAG_BAGE, "%s", "匹配点的距离计算;");
+    calculateDistance(keypoints_query, keypoints_train, matches, distances);
 
     gettimeofday(&end, NULL);
-    char * spend = calTimeSpend(start, end, "Match");
-    LOG(TAG_BAGE, spend);
-    delete (spend);
+    LOG(TAG_BAGE, "Total spend of %s: %d ms.", "Compare",
+            (int )(1000 * (end.tv_sec - start.tv_sec)
+                    + (end.tv_usec - start.tv_usec) / 1000));
 
     Mat match_keypoints;
-    drawMatches(rsrc_1, keypoints_1, rsrc_2, keypoints_2, matches,
-            match_keypoints, Scalar::all(-1), Scalar::all(-1), vector<char>(),
-            DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS);
+    drawMatches(rsrc_query, keypoints_query, rsrc_train, keypoints_train,
+            matches, match_keypoints, Scalar::all(-1), Scalar::all(-1),
+            vector<char>(), DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS);
 
+    // cout << keypoints_query[matches[0].queryIdx].pt << endl;
+    // cout << keypoints_train[matches[0].trainIdx].pt << endl;
     imshow("Matching Result", match_keypoints);
-    //imwrite("match_result.png", match_keypoints);
+    // imwrite("match_result.png", match_keypoints);
     waitKey(0);
 
     return 1;
+}
+
+void BaseMethods::calculateDistance(const vector<KeyPoint>& queryPoints,
+        const vector<KeyPoint>& trainPoints, const vector<DMatch>& matches,
+        vector<double> & distances) {
+    double distance;
+    for (unsigned int i = 0; i < matches.size(); ++i) {
+        distance = dual_camera_f * dual_camera_t / density
+                / (queryPoints[matches[i].queryIdx].pt.x
+                        - trainPoints[matches[i].trainIdx].pt.x);
+        distances.push_back(distance);
+        cout << distance << "m";
+        if ((i + 1) % 8 != 0) {
+            cout << " ";
+        } else
+            cout << endl;
+    }
+    cout << endl;
 }
 
 // 与ORB结合使用，效果较好
@@ -174,7 +228,7 @@ void BaseMethods::matchFeatures(Mat& query, Mat& train,
     Mat matchdistance(train.rows, 2, CV_32FC1);
     flannIndex.knnSearch(train, matchindex, matchdistance, 2,
             flann::SearchParams());
-    //根据劳氏算法
+//根据劳氏算法
     for (int i = 0; i < matchdistance.rows; i++) {
         if (matchdistance.at<float>(i, 0)
                 < 0.6 * matchdistance.at<float>(i, 1)) {
@@ -190,7 +244,7 @@ void BaseMethods::matchFeatures(Mat& query, Mat& train, vector<DMatch>& matches,
         DescriptorMatcher& matcher) {
     vector<vector<DMatch>> temp;
     matcher.knnMatch(query, train, temp, 2);
-    //获取满足Ratio Test的最小匹配的距离
+//获取满足Ratio Test的最小匹配的距离
     float min_distance = FLT_MAX;
     for (unsigned r = 0; r < temp.size(); ++r) {
         //Ratio Test
@@ -221,10 +275,10 @@ bool BaseMethods::refineMatchesWithHomography(
     vector<Point2f> srcPoints(matches.size());
     vector<Point2f> dstPoints(matches.size());
     for (size_t i = 0; i < matches.size(); i++) {
-        srcPoints[i] = trainPoints[matches[i].trainIdx].pt;
-        dstPoints[i] = queryPoints[matches[i].queryIdx].pt;
+        srcPoints[i] = queryPoints[matches[i].queryIdx].pt; // 样本图像关键点
+        dstPoints[i] = trainPoints[matches[i].trainIdx].pt; // 匹配图像关键点
     }
-    // Find homography matrix and get inliers mask
+// Find homography matrix and get inliers mask
     vector<unsigned char> inliersMask(srcPoints.size());
     homography = findHomography(srcPoints, dstPoints, CV_FM_RANSAC,
             reprojectionThreshold, inliersMask);

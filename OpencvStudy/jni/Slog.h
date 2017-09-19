@@ -11,11 +11,14 @@
 #ifndef LOG
 
 #ifndef TAG
-#define TAG "OpenCV Study Logs: "
+#define TAG "OpenCV Study Logs;"
 #endif
 
-#define LOG(tag, log) \
-    printf("%s\n%s: %s\n", TAG, tag, log)
+#define LOG(Tag, formStr, ...) { \
+    printf("%s\n%s: ", TAG, Tag); \
+    printf(formStr, __VA_ARGS__); \
+    printf("\n"); }
+
 #endif
 
 #endif /* JNI_SLOG_H_ */

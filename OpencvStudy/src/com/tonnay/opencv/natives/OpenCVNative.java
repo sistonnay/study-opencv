@@ -1,4 +1,4 @@
-package com.tonnay.opencv;
+package com.tonnay.opencv.natives;
 
 public class OpenCVNative {
     
