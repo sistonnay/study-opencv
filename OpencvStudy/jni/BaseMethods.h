@@ -16,11 +16,20 @@
 #include <iostream>
 #include <sys/time.h>
 #include <opencv2/opencv.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/highgui.hpp>
 #include <opencv2/xfeatures2d.hpp>
 
 using namespace std;
 using namespace cv;
 using namespace cv::xfeatures2d;
+
+struct PointsMBR {
+    double left;
+    double top;
+    double right;
+    double bottom;
+};
 
 struct SurfParams {
     Mat * src = NULL;
@@ -73,6 +82,7 @@ public:
     static double dual_camera_d; //分辨率 米
     static double zoom_size; //放大倍数
     static double density; // 实际分辨率
+    static double match_threshold; // 匹配点距离阈值， 不能靠的太近
 
 public:
     BaseMethods();
@@ -89,14 +99,26 @@ public:
             vector<DMatch>& matches, Mat& homography);
     static void calculateDistance(const vector<KeyPoint>& queryPoints,
             const vector<KeyPoint>& trainPoints, const vector<DMatch>& matches,
-            vector<double> & distances);
+            const Mat& query, PointsMBR& mbr, vector<Point3f>& xyzPoints);
+    static void doSubDiv2D(const vector<KeyPoint>& queryPoints,
+            const vector<DMatch>& matches, const PointsMBR& mbr,
+            const Mat& query, Subdiv2D& subdiv);
+    static void drowDelaunayPoint(const Point2f point, Subdiv2D& subdiv,
+            Mat& img, Scalar color);
+    static void drowDelaunayTriangles(const vector<Vec6f>& triangles,
+            const PointsMBR& mbr, Mat& img, Scalar color);
+    static void drowPointsMBR(const PointsMBR& mbr, Mat& img, Scalar color);
+    static bool isPointInMBR(const PointsMBR& mbr, const Point& point);
+    static bool isLineInMBR(const PointsMBR& mbr, const Point& point1,
+            const Point& point2);
 };
 
-double BaseMethods::zoom_size = 0.5; // 1
+double BaseMethods::zoom_size = 1; // 1
 double BaseMethods::dual_camera_f = 3.75 / 1000; // m
 double BaseMethods::dual_camera_t = 21.0 / 1000; // m
 double BaseMethods::dual_camera_d = 2 * 1.25 / 1000000; // m, 成图相机有缩放
 double BaseMethods::density = dual_camera_d;
+double BaseMethods::match_threshold = 5 * density; // 设置为五个像素大小
 
 int BaseMethods::showImage(const char* img) {
     Mat src = imread(img, IMREAD_COLOR), dst;
@@ -163,24 +185,20 @@ int BaseMethods::compareImages(const char* img1, const char* img2) {
     LOG(TAG_BAGE, "%s", "透射矩阵;");
     cout << homography << endl; // 透视矩阵，一个点到另一个点的变换，即仿射变换
 
-//    -- Get the corners from the img1
-//    vector<Point2f> corners_query(4);
-//    corners_query[0] = Point2f(0, 0);
-//    corners_query[1] = Point2f(rsrc_query.cols, 0);
-//    corners_query[2] = Point2f(rsrc_query.cols, rsrc_query.rows);
-//    corners_query[3] = Point2f(0, rsrc_query.rows);
-//
-//    cout << endl << corners_query << endl;
-//
-//    vector<Point2f> corners_train(4);
-//    vector<Point2f> corners_query(4);
-//    perspectiveTransform(corners_query, corners_train, homography);
+    PointsMBR pointsMBR; // -- Get the corners from the img1
+    vector<Point3f> points3D;
+    LOG(TAG_BAGE, "%s", "匹配点的xyz计算;");
+    calculateDistance(keypoints_query, keypoints_train, matches, rsrc_query,
+            pointsMBR, points3D);
+    LOG(TAG_BAGE, "ImageMBR (%.0f,%.0f,%.0f,%.0f)", pointsMBR.left,
+            pointsMBR.top, pointsMBR.right, pointsMBR.bottom);
+    //构造OpenCV Rect
+    Rect rect(pointsMBR.left - 15, pointsMBR.top - 15,
+            pointsMBR.right - pointsMBR.left + 30,
+            pointsMBR.bottom - pointsMBR.top + 30);
 
-//    cout << endl << corners_train << endl;
-
-    vector<double> distances;
-    LOG(TAG_BAGE, "%s", "匹配点的距离计算;");
-    calculateDistance(keypoints_query, keypoints_train, matches, distances);
+    Subdiv2D subdiv(rect);
+    doSubDiv2D(keypoints_query, matches, pointsMBR, rsrc_query, subdiv);
 
     gettimeofday(&end, NULL);
     LOG(TAG_BAGE, "Total spend of %s: %d ms.", "Compare",
@@ -192,8 +210,6 @@ int BaseMethods::compareImages(const char* img1, const char* img2) {
             matches, match_keypoints, Scalar::all(-1), Scalar::all(-1),
             vector<char>(), DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS);
 
-    // cout << keypoints_query[matches[0].queryIdx].pt << endl;
-    // cout << keypoints_train[matches[0].trainIdx].pt << endl;
     imshow("Matching Result", match_keypoints);
     // imwrite("match_result.png", match_keypoints);
     waitKey(0);
@@ -203,20 +219,54 @@ int BaseMethods::compareImages(const char* img1, const char* img2) {
 
 void BaseMethods::calculateDistance(const vector<KeyPoint>& queryPoints,
         const vector<KeyPoint>& trainPoints, const vector<DMatch>& matches,
-        vector<double> & distances) {
-    double distance;
+        const Mat& query, PointsMBR& mbr, vector<Point3f>& xyzPoints) {
+    Point3f xyz;
+    Mat temp = query.clone();
+    double imgW = temp.cols;
+    double imgH = temp.rows;
+    double query_x, query_y, train_x, train_y;
+    mbr.top = imgH;
+    mbr.left = imgW;
+    mbr.right = mbr.bottom = 0;
+
+    char text[50];
+    int pointsTotal = matches.size(), showPtNum = 30, count = 0;
+    int showIntv = max(pointsTotal / showPtNum, 1); // 一共画30个点的坐标
+
     for (unsigned int i = 0; i < matches.size(); ++i) {
-        distance = dual_camera_f * dual_camera_t / density
-                / (queryPoints[matches[i].queryIdx].pt.x
-                        - trainPoints[matches[i].trainIdx].pt.x);
-        distances.push_back(distance);
-        cout << distance << "m";
-        if ((i + 1) % 8 != 0) {
-            cout << " ";
-        } else
-            cout << endl;
+        query_x = queryPoints[matches[i].queryIdx].pt.x;
+        query_y = queryPoints[matches[i].queryIdx].pt.y;
+        train_x = trainPoints[matches[i].trainIdx].pt.x;
+        train_y = trainPoints[matches[i].trainIdx].pt.y;
+
+        xyz.z = dual_camera_f * dual_camera_t / density / (query_x - train_x);
+        xyz.y = -density * xyz.z * (query_y + train_y - imgH) / 2
+                / dual_camera_f;
+        xyz.x = -density * xyz.z * (imgW / 2 - query_x) / dual_camera_f;
+        xyzPoints.push_back(xyz);
+
+        mbr.top = min(query_y, mbr.top);
+        mbr.left = min(query_x, mbr.left);
+        mbr.right = max(query_x, mbr.right);
+        mbr.bottom = max(query_y, mbr.bottom);
+
+        // printf("(%.2f,%.2f,%.2f)", xyz.x, xyz.y, xyz.z);
+
+        if ((count++) % showIntv == 0) {
+            Scalar color = CV_RGB(rand() & 64, rand() & 64, rand() & 64);
+            sprintf_s(text, 50, "%.2f,%.2f,%.2f", xyz.x, xyz.y, xyz.z);
+            putText(temp, text, Point(query_x - 13, query_y - 3),
+                    FONT_HERSHEY_SIMPLEX, .3, color);
+            circle(temp, queryPoints[matches[i].queryIdx].pt, 2, color, 3);
+        }
+
+        // if ((i + 1) % 8 != 0) {
+        //     cout << " ";
+        // } else
+        //     cout << endl;
     }
-    cout << endl;
+    // cout << endl;
+    imshow("Show XYZ", temp);
 }
 
 // 与ORB结合使用，效果较好
@@ -228,7 +278,7 @@ void BaseMethods::matchFeatures(Mat& query, Mat& train,
     Mat matchdistance(train.rows, 2, CV_32FC1);
     flannIndex.knnSearch(train, matchindex, matchdistance, 2,
             flann::SearchParams());
-//根据劳氏算法
+    //根据劳氏算法
     for (int i = 0; i < matchdistance.rows; i++) {
         if (matchdistance.at<float>(i, 0)
                 < 0.6 * matchdistance.at<float>(i, 1)) {
@@ -244,7 +294,7 @@ void BaseMethods::matchFeatures(Mat& query, Mat& train, vector<DMatch>& matches,
         DescriptorMatcher& matcher) {
     vector<vector<DMatch>> temp;
     matcher.knnMatch(query, train, temp, 2);
-//获取满足Ratio Test的最小匹配的距离
+    //获取满足Ratio Test的最小匹配的距离
     float min_distance = FLT_MAX;
     for (unsigned r = 0; r < temp.size(); ++r) {
         //Ratio Test
@@ -278,17 +328,107 @@ bool BaseMethods::refineMatchesWithHomography(
         srcPoints[i] = queryPoints[matches[i].queryIdx].pt; // 样本图像关键点
         dstPoints[i] = trainPoints[matches[i].trainIdx].pt; // 匹配图像关键点
     }
-// Find homography matrix and get inliers mask
+    // Find homography matrix and get inliers mask
     vector<unsigned char> inliersMask(srcPoints.size());
     homography = findHomography(srcPoints, dstPoints, CV_FM_RANSAC,
             reprojectionThreshold, inliersMask);
+
     vector<DMatch> inliers;
+    vector<DMatch>::iterator iter;
     for (size_t i = 0; i < inliersMask.size(); i++) {
-        if (inliersMask[i])
+        if (inliersMask[i]) {
+            for (iter = inliers.begin(); iter != inliers.end(); ++iter) {
+                Point2f diff = srcPoints[i] - queryPoints[iter->queryIdx].pt;
+                float dist = abs(diff.x) + abs(diff.y);
+                if (dist < match_threshold) //控制匹配点的距离
+                    break;
+            }
+            if (iter != inliers.end())
+                continue;
             inliers.push_back(matches[i]);
+        }
     }
     matches.swap(inliers);
     return matches.size() > minMatchesNum;
+}
+
+void BaseMethods::doSubDiv2D(const vector<KeyPoint>& queryPoints,
+        const vector<DMatch>& matches, const PointsMBR& mbr, const Mat& query,
+        Subdiv2D& subdiv) {
+    // copy for draw image
+    Mat img = query.clone();
+    Scalar vertex_color(255, 0, 255), edge_color(255, 255, 0);
+    for (size_t i = 0; i < matches.size(); ++i) {
+        //    drowDelaunayPoint(queryPoints[matches[i].queryIdx].pt, subdiv, img,
+        //            edge_color);
+        //  // insert delaunay points
+        subdiv.insert(queryPoints[matches[i].queryIdx].pt);
+    }
+    vector<Vec6f> triangles;
+    subdiv.getTriangleList(triangles);
+    drowDelaunayTriangles(triangles, mbr, img, edge_color);
+    drowPointsMBR(mbr, img, Scalar(0, 0, 255));
+    imshow("Show Delaunay", img);
+}
+
+//插入一个绘制一个，插入完再绘制
+void BaseMethods::drowDelaunayPoint(const Point2f point, Subdiv2D& subdiv,
+        Mat& img, Scalar color) {
+    int e0 = 0, vertex = 0;
+    subdiv.locate(point, e0, vertex);
+    if (e0 > 0) { // 非虚拟边
+        int e = e0;
+        do {
+            Point2f org, dst;
+            if (subdiv.edgeOrg(e, &org) > 0 && subdiv.edgeDst(e, &dst) > 0)
+                line(img, org, dst, color, 1, LINE_AA, 0);
+            e = subdiv.getEdge(e, Subdiv2D::NEXT_AROUND_ORG);
+        } while (e != e0);
+    }
+    circle(img, point, 2, Scalar(125, 255, 0), FILLED, LINE_8, 0);
+}
+
+void BaseMethods::drowDelaunayTriangles(const vector<Vec6f>& triangles,
+        const PointsMBR& mbr, Mat& img, Scalar color) {
+    vector<Point> pt(3);
+    for (size_t i = 0; i < triangles.size(); i++) {
+        pt[0] = Point(cvRound(triangles[i][0]), cvRound(triangles[i][1]));
+        pt[1] = Point(cvRound(triangles[i][2]), cvRound(triangles[i][3]));
+        pt[2] = Point(cvRound(triangles[i][4]), cvRound(triangles[i][5]));
+        if (isLineInMBR(mbr, pt[0], pt[1])) {
+            line(img, pt[0], pt[1], color, 1, LINE_AA, 0);
+        }
+        if (isLineInMBR(mbr, pt[1], pt[2])) {
+            line(img, pt[1], pt[2], color, 1, LINE_AA, 0);
+        }
+        if (isLineInMBR(mbr, pt[2], pt[0])) {
+            line(img, pt[2], pt[0], color, 1, LINE_AA, 0);
+        }
+    }
+}
+
+bool BaseMethods::isPointInMBR(const PointsMBR& mbr, const Point& point) {
+    if (point.x <= mbr.right && point.x >= mbr.left && point.y <= mbr.bottom
+            && point.y >= mbr.top)
+        return true;
+    return false;
+}
+
+bool BaseMethods::isLineInMBR(const PointsMBR& mbr, const Point& point1,
+        const Point& point2) {
+    return isPointInMBR(mbr, point1) && isPointInMBR(mbr, point2);
+}
+
+void BaseMethods::drowPointsMBR(const PointsMBR& mbr, Mat& img, Scalar color) {
+    vector<Point> mbrPoint(4);
+    mbrPoint[0] = Point(mbr.left, mbr.top);
+    mbrPoint[1] = Point(mbr.left, mbr.bottom);
+    mbrPoint[2] = Point(mbr.right, mbr.bottom);
+    mbrPoint[3] = Point(mbr.right, mbr.top);
+    line(img, mbrPoint[0], mbrPoint[1], color, 1, LINE_AA, 0);
+    line(img, mbrPoint[1], mbrPoint[2], color, 1, LINE_AA, 0);
+    line(img, mbrPoint[2], mbrPoint[3], color, 1, LINE_AA, 0);
+    line(img, mbrPoint[3], mbrPoint[0], color, 1, LINE_AA, 0);
 }
 
 #endif /* JNI_BASEMETHODS_H_ */
